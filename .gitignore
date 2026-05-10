@@ -1,0 +1,22 @@
+# Go
+/bin/
+*.test
+*.out
+
+# Generated proto stubs
+/gen/
+
+# Frontend
+/web/node_modules/
+/web/.svelte-kit/
+/web/build/
+/web/.env*
+
+# Editor
+.DS_Store
+.idea/
+.vscode/
+
+# Env
+.env
+.env.local
