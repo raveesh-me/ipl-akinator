@@ -7,27 +7,27 @@ import (
 )
 
 // Session holds per-game state. Sessions are kept in-memory; for the hackathon
-// this is sufficient. To horizontally scale, swap the SessionStore for Firestore.
+// this is sufficient. To horizontally scale, swap the Store for Firestore.
 type Session struct {
-	ID            string
-	Beliefs       map[string]float64
-	Players       map[string]data.Player
-	Library       []Question
-	libraryByID   map[string]Question
-	Asked         map[string]bool
-	Answers       map[string]Answer
-	History       []HistoryItem
-	CategoryUsed  map[string]int
+	ID             string
+	Beliefs        map[string]float64
+	Players        map[string]data.Player
+	Library        []Question
+	libraryByID    map[string]Question
+	Asked          map[string]bool
+	History        []HistoryItem
+	CategoryUsed   map[string]int
 	QuestionsAsked int
 
 	mu sync.Mutex
 }
 
-// HistoryItem records a Q/A pair for feedback / debugging.
+// HistoryItem records a Q/A pair for feedback / debugging / LLM context.
 type HistoryItem struct {
-	QuestionID   string
-	QuestionText string
-	Answer       Answer
+	QuestionID    string
+	QuestionText  string
+	OptionID      string
+	OptionLabel   string
 }
 
 // NewSession constructs a fresh game state from the player dataset.
@@ -48,7 +48,6 @@ func NewSession(id string, players []data.Player) *Session {
 		Library:      lib,
 		libraryByID:  libByID,
 		Asked:        map[string]bool{},
-		Answers:      map[string]Answer{},
 		CategoryUsed: map[string]int{},
 	}
 }
@@ -61,6 +60,15 @@ func (s *Session) QuestionByID(id string) (Question, bool) {
 	return q, ok
 }
 
+// AddNovelQuestion injects an LLM-generated question into this session's
+// library so the engine treats it as a first-class candidate.
+func (s *Session) AddNovelQuestion(q Question) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.libraryByID[q.ID] = q
+	s.Library = append(s.Library, q)
+}
+
 // NextQuestion picks the highest expected-info-gain unasked question.
 func (s *Session) NextQuestion() (Question, float64, bool) {
 	s.mu.Lock()
@@ -68,28 +76,36 @@ func (s *Session) NextQuestion() (Question, float64, bool) {
 	return SelectNextQuestion(s.Beliefs, s.Players, s.Library, s.Asked, s.CategoryUsed)
 }
 
-// ApplyAnswer updates the belief state and records the answer.
-func (s *Session) ApplyAnswer(qID string, ans Answer) bool {
+// ApplyAnswer updates the belief state and records the chosen option.
+func (s *Session) ApplyAnswer(qID, optID string) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	q, ok := s.libraryByID[qID]
 	if !ok {
 		return false
 	}
-	Update(s.Beliefs, s.Players, q, ans)
+	Update(s.Beliefs, s.Players, q, optID)
 	s.Asked[qID] = true
-	s.Answers[qID] = ans
 	s.CategoryUsed[q.Category]++
 	s.QuestionsAsked++
+
+	var label string
+	for _, o := range q.Options {
+		if o.ID == optID {
+			label = o.Label
+			break
+		}
+	}
 	s.History = append(s.History, HistoryItem{
 		QuestionID:   qID,
 		QuestionText: q.Text,
-		Answer:       ans,
+		OptionID:     optID,
+		OptionLabel:  label,
 	})
 	return true
 }
 
-// BestGuess returns the highest-probability candidate and its confidence.
+// BestGuess returns the highest-probability candidate.
 func (s *Session) BestGuess() Candidate {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -107,8 +123,7 @@ func (s *Session) Top(k int) []Candidate {
 	return TopK(s.Beliefs, s.Players, k)
 }
 
-// ShouldGuess returns true when the engine has reached confidence or runs out
-// of question budget.
+// ShouldGuess: confidence threshold OR budget exhausted.
 func (s *Session) ShouldGuess() bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -122,7 +137,7 @@ func (s *Session) ShouldGuess() bool {
 	return top[0].Probability >= ConfidenceThreshold
 }
 
-// QuestionsRemaining is the budget left.
+// QuestionsRemaining returns the budget left.
 func (s *Session) QuestionsRemaining() int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -131,6 +146,21 @@ func (s *Session) QuestionsRemaining() int {
 		return 0
 	}
 	return r
+}
+
+// Pool returns the player dataset for this session. The map is read-only;
+// callers must not mutate it.
+func (s *Session) Pool() map[string]data.Player {
+	return s.Players
+}
+
+// HistorySnapshot returns a copy of the Q/A trail for LLM/feedback context.
+func (s *Session) HistorySnapshot() []HistoryItem {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]HistoryItem, len(s.History))
+	copy(out, s.History)
+	return out
 }
 
 // Store is a tiny in-memory session registry.

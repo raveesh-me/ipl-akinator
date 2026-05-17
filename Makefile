@@ -1,19 +1,13 @@
-.PHONY: gen run web tidy lint clean
-
-gen:
-	buf generate
+.PHONY: run build tidy clean
 
 run:
-	go run ./cmd/server
+	go run ./cmd/akinator
 
-web:
-	cd web && npm run dev
+build:
+	go build -o bin/akinator ./cmd/akinator
 
 tidy:
 	go mod tidy
 
-lint:
-	buf lint
-
 clean:
-	rm -rf gen web/src/lib/gen web/.svelte-kit web/build
+	rm -rf bin feedback.jsonl

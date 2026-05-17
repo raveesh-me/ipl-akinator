@@ -1,0 +1,6 @@
+# Raw cricsheet downloads — regenerable via build_players.py
+ipl_json/
+ipl_json.zip
+t20s_male_json/
+t20s_male_json.zip
+people.csv

@@ -1,6 +1,11 @@
 // Package engine implements the probabilistic Akinator core: a belief state
 // over candidate IPL players, Bayesian updates per answer, and information-gain
 // driven question selection. There is intentionally no decision tree.
+//
+// Each Question carries 2..N Options. An Option has a per-player likelihood
+// function L_o(p) = P(player p would pick this option). Choosing option o
+// multiplies the prior by L_o(p) and renormalises. Expected info gain
+// marginalises over all options of an unasked question.
 package engine
 
 import (
@@ -10,56 +15,57 @@ import (
 	"github.com/raveesh/ai-akinator/internal/data"
 )
 
-// Answer mirrors the proto enum.
-type Answer int
-
-const (
-	AnswerUnknown Answer = iota
-	AnswerYes
-	AnswerNo
-	AnswerMaybe
-	AnswerDontKnow
-)
-
-// likelihoodSmoothing keeps strict 0/1 predicates from collapsing the posterior
-// when the user mis-answers a single question. Tune to taste.
-const likelihoodSmoothing = 0.05
-
-// MaybeWeight is how strongly a "maybe" answer pushes toward Yes.
-const maybeYesWeight = 0.65
-
 // MaxQuestions is the hard ceiling per the brief.
 const MaxQuestions = 8
 
-// ConfidenceThreshold is when we stop and commit to a final guess.
+// ConfidenceThreshold stops the game and commits to a guess.
 const ConfidenceThreshold = 0.80
 
-// Likelihood returns P(answer | player gives Yes-prob = q).
-//
-// q is the predicate output for the player. We smooth so the user can be wrong
-// on any individual question without zeroing out a strong candidate.
-func Likelihood(q float64, ans Answer) float64 {
-	q = clamp(q, likelihoodSmoothing, 1-likelihoodSmoothing)
-	switch ans {
-	case AnswerYes:
-		return q
-	case AnswerNo:
-		return 1 - q
-	case AnswerMaybe:
-		return maybeYesWeight*q + (1-maybeYesWeight)*(1-q)
-	case AnswerDontKnow:
-		return 1.0 // no evidence; flat
-	default:
-		return 1.0
-	}
+// DontKnowID is the conventional option id for a flat (no-update) answer.
+// Every Question we emit includes one of these so the user can punt cleanly.
+const DontKnowID = "dont_know"
+
+// Option is a single answer the user can choose for a question.
+type Option struct {
+	ID    string
+	Label string
+	// Likelihood returns P(player p picks this option | feature vector of p).
+	// For "Don't know", return 1.0 to make the Bayesian update a no-op.
+	Likelihood func(p data.Player) float64
 }
 
-// Update applies a Bayesian update of the belief vector given an answer to q.
-func Update(beliefs map[string]float64, players map[string]data.Player, q Question, ans Answer) {
+// Question is an atomic, machine-evaluable query over the candidate pool.
+// IMPORTANT: this is a *feature library*, not a decision tree. The engine
+// chooses among Questions at runtime via expected info gain on the live belief
+// state.
+type Question struct {
+	ID       string
+	Text     string
+	Category string
+	Source   string // "static" or "novel"
+	Options  []Option
+}
+
+// optionByID finds an option within a question.
+func (q Question) optionByID(id string) (Option, bool) {
+	for _, o := range q.Options {
+		if o.ID == id {
+			return o, true
+		}
+	}
+	return Option{}, false
+}
+
+// Update applies a Bayesian update of the belief vector given that the user
+// selected option `optID` on question q.
+func Update(beliefs map[string]float64, players map[string]data.Player, q Question, optID string) {
+	o, ok := q.optionByID(optID)
+	if !ok {
+		return
+	}
 	var z float64
 	for id, prior := range beliefs {
-		p := players[id]
-		l := Likelihood(q.Predicate(p), ans)
+		l := o.Likelihood(players[id])
 		beliefs[id] = prior * l
 		z += beliefs[id]
 	}
@@ -89,44 +95,59 @@ func Entropy(beliefs map[string]float64) float64 {
 }
 
 // ExpectedInfoGain returns the expected entropy reduction if we ask q next,
-// marginalizing over the {Yes, No} hypothetical user answers under the current
-// belief state.
+// marginalising over all of q's *informative* options (we exclude the flat
+// "Don't know" option from the expectation since it carries no signal).
 func ExpectedInfoGain(beliefs map[string]float64, players map[string]data.Player, q Question) float64 {
 	h0 := Entropy(beliefs)
 
-	// P(Yes) = sum_p beliefs[p] * predicate(p) (smoothed).
-	var pYes float64
-	for id, b := range beliefs {
-		pYes += b * clamp(q.Predicate(players[id]), likelihoodSmoothing, 1-likelihoodSmoothing)
-	}
-	pNo := 1 - pYes
+	// For each non-flat option, compute the marginal P(option) under the current
+	// belief and the posterior entropy. The flat option (Likelihood = 1 for all
+	// players) is excluded because it contributes no information.
+	var expectedH float64
+	var massInformative float64
 
-	// Posterior under Yes.
-	postYes := make(map[string]float64, len(beliefs))
-	postNo := make(map[string]float64, len(beliefs))
-	var zY, zN float64
-	for id, prior := range beliefs {
-		predicate := q.Predicate(players[id])
-		ly := Likelihood(predicate, AnswerYes)
-		ln := Likelihood(predicate, AnswerNo)
-		postYes[id] = prior * ly
-		postNo[id] = prior * ln
-		zY += postYes[id]
-		zN += postNo[id]
+	for _, o := range q.Options {
+		if isFlatOption(o, players) {
+			continue
+		}
+		var pO float64
+		post := make(map[string]float64, len(beliefs))
+		for id, prior := range beliefs {
+			l := o.Likelihood(players[id])
+			post[id] = prior * l
+			pO += post[id]
+		}
+		if pO <= 0 {
+			continue
+		}
+		for id := range post {
+			post[id] /= pO
+		}
+		expectedH += pO * Entropy(post)
+		massInformative += pO
 	}
-	if zY > 0 {
-		for id := range postYes {
-			postYes[id] /= zY
+	if massInformative <= 0 {
+		return 0
+	}
+	expectedH /= massInformative
+	return h0 - expectedH
+}
+
+// isFlatOption returns true if the option's likelihood is constant across the
+// candidate pool — i.e., it tells us nothing.
+func isFlatOption(o Option, players map[string]data.Player) bool {
+	first := math.NaN()
+	for _, p := range players {
+		v := o.Likelihood(p)
+		if math.IsNaN(first) {
+			first = v
+			continue
+		}
+		if math.Abs(v-first) > 1e-9 {
+			return false
 		}
 	}
-	if zN > 0 {
-		for id := range postNo {
-			postNo[id] /= zN
-		}
-	}
-	hY := Entropy(postYes)
-	hN := Entropy(postNo)
-	return h0 - (pYes*hY + pNo*hN)
+	return true
 }
 
 // SelectNextQuestion picks the unasked question with highest expected info gain.
@@ -148,7 +169,6 @@ func SelectNextQuestion(
 		}
 		gain := ExpectedInfoGain(beliefs, players, q)
 		catCount := categoryUsed[q.Category]
-		// Pick highest gain; on near-ties, prefer underused categories.
 		if gain > bestGain+1e-9 || (math.Abs(gain-bestGain) < 1e-9 && catCount < bestCatCount) {
 			best = q
 			bestGain = gain
@@ -157,6 +177,13 @@ func SelectNextQuestion(
 		}
 	}
 	return best, bestGain, found
+}
+
+// Candidate is a ranked player from the belief state.
+type Candidate struct {
+	ID          string
+	Name        string
+	Probability float64
 }
 
 // TopK returns the K highest-probability candidates.
@@ -176,17 +203,7 @@ func TopK(beliefs map[string]float64, players map[string]data.Player, k int) []C
 	return cs
 }
 
-// Candidate is a ranked player from the belief state.
-type Candidate struct {
-	ID          string
-	Name        string
-	Probability float64
-}
-
 // InitialBeliefs builds a prior over players using popularity as a soft weight.
-// Popularity matters: more popular players are *a priori* more likely to be the
-// one the user is thinking of, which lets early questions discriminate among
-// realistic candidates rather than long-tail ones.
 func InitialBeliefs(players []data.Player) map[string]float64 {
 	beliefs := make(map[string]float64, len(players))
 	var sum float64
@@ -204,12 +221,3 @@ func InitialBeliefs(players []data.Player) map[string]float64 {
 	return beliefs
 }
 
-func clamp(x, lo, hi float64) float64 {
-	if x < lo {
-		return lo
-	}
-	if x > hi {
-		return hi
-	}
-	return x
-}

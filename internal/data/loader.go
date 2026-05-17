@@ -33,6 +33,11 @@ type Player struct {
 	BowlsDeathOvers   bool     `json:"bowls_death_overs"`
 	IsLegend          bool     `json:"is_legend"`
 	Popularity        float64  `json:"popularity"` // prior weight; 0..1
+
+	// Description is a short free-text blurb fed to the vector index. Lets
+	// novel LLM-generated questions be scored against the full pool without
+	// requiring every feature column to be hand-labelled.
+	Description string `json:"description,omitempty"`
 }
 
 // Load parses the embedded dataset.
