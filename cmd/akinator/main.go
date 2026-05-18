@@ -80,6 +80,11 @@ func runGame(in *bufio.Scanner, players []data.Player, llmClient *llm.Client) {
 		if !ok {
 			break
 		}
+		// No remaining question carries meaningful signal — stop and guess
+		// with what we have rather than waste a turn.
+		if sess.AskedCount() > 0 && gain < engine.MinInfoGainBits {
+			break
+		}
 		askQuestion(in, sess, q, gain, llmClient)
 	}
 	finalGuess(in, sess)
@@ -94,12 +99,11 @@ func askQuestion(in *bufio.Scanner, sess *engine.Session, q engine.Question, gai
 
 	clearScreen()
 	fmt.Print(banner)
-	fmt.Println(mascotLine(conf, sess.QuestionsRemaining()))
+	fmt.Println(mascotLine(conf))
 	fmt.Println()
 
 	text := phraseOrDefault(llmClient, q, top)
-	asked := engine.MaxQuestions - sess.QuestionsRemaining()
-	fmt.Printf("  ❓  Q%d   %s\n", asked+1, text)
+	fmt.Printf("  ❓  Q%d   %s\n", sess.AskedCount()+1, text)
 	fmt.Printf("       ↳ info-gain ≈ %.3f bits\n\n", gain)
 
 	for i, o := range q.Options {
@@ -177,7 +181,7 @@ func phraseOrDefault(c *llm.Client, q engine.Question, top []engine.Candidate) s
 	return out
 }
 
-func mascotLine(confidence float64, qLeft int) string {
+func mascotLine(confidence float64) string {
 	face, mood := "( ◔_◔ )", "Tell me more…"
 	switch {
 	case confidence >= engine.ConfidenceThreshold:
@@ -187,15 +191,7 @@ func mascotLine(confidence float64, qLeft int) string {
 	case confidence >= 0.2:
 		face, mood = "( ¬‿¬ )", "Narrowing it down…"
 	}
-	return fmt.Sprintf("    %s   \"%s\"    [ %d question%s left ]",
-		face, mood, qLeft, plural(qLeft))
-}
-
-func plural(n int) string {
-	if n == 1 {
-		return ""
-	}
-	return "s"
+	return fmt.Sprintf("    %s   \"%s\"", face, mood)
 }
 
 func readChoice(in *bufio.Scanner, max int) int {

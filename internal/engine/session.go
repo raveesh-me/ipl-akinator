@@ -137,6 +137,13 @@ func (s *Session) ShouldGuess() bool {
 	return top[0].Probability >= ConfidenceThreshold
 }
 
+// AskedCount returns the number of questions asked so far.
+func (s *Session) AskedCount() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.QuestionsAsked
+}
+
 // QuestionsRemaining returns the budget left.
 func (s *Session) QuestionsRemaining() int {
 	s.mu.Lock()

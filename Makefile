@@ -1,5 +1,9 @@
 .PHONY: run build tidy clean
 
+# Auto-load .env if present. The leading dash makes the include optional.
+-include .env
+export
+
 run:
 	go run ./cmd/akinator
 

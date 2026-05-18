@@ -5,19 +5,22 @@ Hackathon project. AI-powered guessing game that identifies an IPL cricketer (pa
 ## Brief
 
 ### Problem
-Build an Akinator-style system strictly scoped to the IPL ecosystem (players, roles, teams, match contexts). Identify a player the user is thinking of in **≤ 8 questions** (hard cap; spec also mentions ≤12 — we target 8).
+Build an Akinator-style system strictly scoped to the IPL ecosystem (players, roles, teams, match contexts). Identify a player the user is thinking of in **as few questions as possible** — no fixed budget, just stop as soon as we're confident or further probing won't help.
 
 ### Hard rules
 - **No hardcoded decision trees.** Reasoning must be probabilistic / dynamic.
 - IPL players only (2008–present, Indian + overseas, all roles).
-- Confidence ≥ 80% → make final guess. Otherwise keep asking, up to 8 questions, then guess best candidate.
+- Stop and guess when **any one of** holds:
+  - `max p ≥ 0.80` (confident).
+  - Best unasked question has expected info gain < `MinInfoGainBits` (0.05) — no remaining question carries enough signal to be worth a turn.
+  - `MaxQuestions = 15` safety ceiling (only hit on pathological input).
 - Learn from feedback (wrong-guess corrections feed future sessions).
 
 ### Engine design (this repo)
 1. **Candidate pool** — every IPL player loaded from `internal/data/players.json` with a feature vector (role, nationality, teams, eras, captaincy, finisher, death-overs bowler, awards, etc.).
 2. **Belief state** — probability distribution over candidates. Updated via Bayesian update on each Yes/No/Maybe/Don't-know answer using per-feature likelihood.
 3. **Question selection** — for each candidate feature/question, compute expected entropy reduction (info gain) over the current belief state; pick the highest. The LLM (Gemini) is used to *phrase* the chosen feature-question naturally and to *generate novel discriminating questions* when the top candidates differ on attributes not in the static feature set.
-4. **Stopping** — emit final guess when `max p ≥ 0.8` OR `questions == 8`.
+4. **Stopping** — emit final guess when `max p ≥ 0.8` OR best next-question info gain < 0.05 bits OR safety cap of 15 hit.
 5. **Feedback** — wrong guesses persist (player, question history, correct answer) so future sessions can re-weight features.
 
 ### Tech stack

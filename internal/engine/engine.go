@@ -15,11 +15,20 @@ import (
 	"github.com/raveesh/ai-akinator/internal/data"
 )
 
-// MaxQuestions is the hard ceiling per the brief.
-const MaxQuestions = 8
+// MaxQuestions is a safety ceiling, not a target. The engine aims to stop as
+// early as possible via ConfidenceThreshold or MinInfoGainBits — this constant
+// only exists to bound pathological cases (e.g. user gives contradictory
+// answers and confidence never converges).
+const MaxQuestions = 15
 
 // ConfidenceThreshold stops the game and commits to a guess.
 const ConfidenceThreshold = 0.80
+
+// MinInfoGainBits is the floor below which an unasked question is considered
+// not worth asking — the engine should just guess with what it has rather
+// than waste a turn. Applied only after the first question, so the engine
+// always gets a chance to probe the belief space.
+const MinInfoGainBits = 0.05
 
 // DontKnowID is the conventional option id for a flat (no-update) answer.
 // Every Question we emit includes one of these so the user can punt cleanly.
